@@ -1,0 +1,105 @@
+name: Container Security Scan - Trivy
+
+# Required secrets:
+#   DEPLOY_TOKEN  — GitHub PAT with repo + workflow scope (for private repo access if needed)
+#   No secrets required for public repo scanning with GITHUB_TOKEN
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  schedule:
+    # Run weekly security audit every Monday at 08:00 UTC
+    - cron: '0 8 * * 1'
+
+jobs:
+  trivy-image-scan:
+    name: "Trivy Image Vulnerability Scan"
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write  # Required to upload SARIF to GitHub Security tab
+      contents: read
+      packages: write          # Required to push to GitHub Container Registry (GHCR)
+
+    steps:
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}  # Auto-provided by GitHub Actions — no setup needed
+
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Build Target Docker Image
+        run: |
+          docker build -t portfolio-app:${{ github.sha }} -f app/Dockerfile app/
+
+      - name: Run Trivy Vulnerability Scanner (Table Output)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'portfolio-app:${{ github.sha }}'
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Run Trivy Scanner (SARIF for GitHub Security Tab)
+        uses: aquasecurity/trivy-action@master
+        if: always()  # Always generate report, even if scan above fails
+        with:
+          image-ref: 'portfolio-app:${{ github.sha }}'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH,MEDIUM'
+
+      - name: Upload SARIF Report to GitHub Security Tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  trivy-config-scan:
+    name: "Trivy Misconfiguration Scan (IaC & Dockerfile)"
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Scan for IaC Misconfigurations (Kubernetes, Terraform, Dockerfile)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'config'
+          scan-ref: '.'
+          format: 'table'
+          exit-code: '0'   # Don't fail the build for misconfigs (informational)
+          severity: 'CRITICAL,HIGH,MEDIUM'
+
+      - name: Generate Config Scan SARIF Report
+        uses: aquasecurity/trivy-action@master
+        if: always()
+        with:
+          scan-type: 'config'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-config.sarif'
+          severity: 'CRITICAL,HIGH,MEDIUM'
+
+      - name: Upload Config Scan Report
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-config.sarif'
